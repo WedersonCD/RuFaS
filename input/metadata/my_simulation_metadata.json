@@ -234,7 +234,7 @@
     "feed_storage_instances": {
       "title": "Feed Storages",
       "description": "Names of feed storage configs used in the simulation.",
-      "path": "input/data/feed_management/example_freestall_feed_storages.json",
+      "path": "input/data/feed_management/no_feed_storages.json",
       "type": "json",
       "properties": "feed_storage_instances"
     }
