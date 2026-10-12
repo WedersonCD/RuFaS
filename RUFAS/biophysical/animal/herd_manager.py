@@ -31,6 +31,7 @@ from RUFAS.biophysical.animal.milk.milk_production import MilkProduction
 from RUFAS.biophysical.animal.nutrients.nutrition_supply_calculator import NutritionSupplyCalculator
 from RUFAS.biophysical.animal.pen import Pen
 from RUFAS.biophysical.animal.ration.calf_ration_manager import CalfMilkType, CalfRationManager, WHOLE_MILK_ID
+from RUFAS.biophysical.animal.ration.nutrition_aggregation import NutritionAggregation
 from RUFAS.biophysical.animal.ration.ration_manager import RationManager
 from RUFAS.current_day_conditions import CurrentDayConditions
 from RUFAS.biophysical.animal.data_types.animal_manure_excretions import AnimalManureExcretions
@@ -220,6 +221,9 @@ class HerdManager:
         RationManager.maximum_ration_reformulation_attempts = animal_config_data["ration"][
             "maximum_ration_reformulation_attempts"
         ]
+        RationManager.nutrition_aggregation = NutritionAggregation(
+            **animal_config_data["ration"].get("nutrition_aggregation", {})
+        )
         self.set_milk_type_in_calf_ration_manager()
         self._max_daily_feeds: dict[RUFAS_ID, float] = {}
 
@@ -2439,7 +2443,6 @@ class HerdManager:
                             body_weight=animal.body_weight,
                             simulation_day=simulation_day,
                         )
-
 
     def _update_total_enteric_methane(self, digestive_outputs: list[dict[AnimalType, dict[str, float]]]) -> None:
         """Update the amount of total enteric methane in the herd statistics."""

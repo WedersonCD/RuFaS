@@ -5,6 +5,7 @@ from RUFAS.data_structures.feed_storage_to_animal_connection import RUFAS_ID
 from RUFAS.biophysical.animal.data_types.animal_combination import AnimalCombination
 from RUFAS.biophysical.animal.data_types.intake_option import IntakeOption
 from RUFAS.general_constants import GeneralConstants
+from RUFAS.biophysical.animal.ration.nutrition_aggregation import NutritionAggregation
 from RUFAS.output_manager import OutputManager
 from RUFAS.units import MeasurementUnits
 
@@ -44,6 +45,8 @@ class RationManager:
     ration_feeds: dict[AnimalCombination, list[RUFAS_ID]] | None
     user_defined_rations: dict[AnimalCombination, dict[RUFAS_ID, float]] | None
     tolerance: float | None = 0.0
+    nutrition_aggregation = NutritionAggregation()
+
     maximum_ration_reformulation_attempts: int
     intake_options: dict[AnimalCombination, IntakeOption] = {}
     intake_values: dict[AnimalCombination, float | None] = {}

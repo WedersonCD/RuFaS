@@ -1,4 +1,5 @@
 from typing import Any
+from pathlib import Path
 from unittest.mock import Mock, PropertyMock, MagicMock, create_autospec
 
 import numpy as np
@@ -2761,3 +2762,96 @@ def test_calculate_manure_surface_area(
         mock_add_error.assert_called_once()
     else:
         assert pen._calculate_manure_surface_area() == expected_area
+
+
+@pytest.mark.parametrize("method", ["MEAN", "MEDIAN", "AUTO_MEDIAN", "AUTO_P75"])
+@pytest.mark.parametrize("standard", [NutrientStandard.NRC, NutrientStandard.NASEM])
+def test_aggregation_reaches_optimizer_and_reports_retries(
+    mocker: MockerFixture,
+    pen: Pen,
+    animals_in_pen: dict[int, Animal],
+    method: str,
+    standard: NutrientStandard,
+    tmp_path: Path,
+) -> None:
+    from copy import deepcopy
+    from RUFAS.biophysical.animal.ration.nutrition_aggregation import NutritionAggregation
+
+    strategy = NutritionAggregation(method)
+    mocker.patch.object(RationManager, "nutrition_aggregation", strategy)
+    base = next(iter(animals_in_pen.values()))
+    pen.animals_in_pen = {i: deepcopy(base) for i in range(3)}
+    for i, animal in pen.animals_in_pen.items():
+        animal.nutrient_standard = standard
+        animal.nutrition_requirements.calcium = [1.0, 1.0, 10.0][i]
+        animal.nutrition_requirements.metabolizable_protein = [1.0, 1.0, 10.0][i]
+    original = pen.average_nutrition_requirements
+    target = strategy.aggregate([a.nutrition_requirements for a in pen.animals_in_pen.values()])[0]
+    mocker.patch.object(pen, "set_animal_nutritional_requirements")
+    failed, success = OptimizeResult(success=False), OptimizeResult(success=True)
+    optimizer = mocker.patch.object(
+        pen.ration_optimizer,
+        "attempt_optimization",
+        side_effect=[
+            (failed, Mock(spec=RationConfig)),
+            (success, Mock(spec=RationConfig)),
+        ],
+    )
+    handle = mocker.patch.object(pen.ration_optimizer, "handle_failed_constraints", return_value=[])
+    mocker.patch.object(pen, "_maybe_increased_dmi_for_retry", return_value=None)
+    mocker.patch.object(pen, "_handle_lactation_failure_in_loop", return_value=False)
+    report = mocker.spy(pen.om, "add_variable")
+    result = pen._run_formulation_attempts(
+        False, _mock_feeds(), 25, {}, original.dry_matter, target.metabolizable_protein, 12, {}
+    )
+    assert result is success
+    assert len(optimizer.call_args_list) == 2
+    for call in optimizer.call_args_list:
+        assert call.kwargs["requirements"] == target
+        assert call.kwargs["initial_protein_requirement"] == target.metabolizable_protein
+    assert handle.call_args.kwargs["average_nutrient_requirements"] == target
+    assert pen.average_nutrition_requirements == original
+    records = [c.args[1] for c in report.call_args_list if c.args[0].endswith("_calcium")]
+    assert [r["attempt"] for r in records] == [1, 2]
+    assert {r["formulation_event_id"] for r in records} == {1}
+    assert all(r["simulation_day"] == 12 and r["selected_value"] == target.calcium for r in records)
+    # Exercise the real CSV serializer, including mixed numeric/text diagnostic columns.
+    key = next(k for k in pen.om.variables_pool if "nutrition_aggregation_pen_1_calcium" in k)
+    path = tmp_path / "aggregation.csv"
+    pen.om._dict_to_file_csv({key: pen.om.variables_pool[key]}, path)
+    import pandas as pd
+
+    assert any("formulation_event_id" in c for c in pd.read_csv(path).columns)
+
+
+@pytest.mark.parametrize("method", ["MEDIAN", "AUTO_MEDIAN", "AUTO_P75"])
+@pytest.mark.parametrize("manual", [False, True])
+def test_experimental_failure_preserves_existing_fallback(
+    mocker: MockerFixture,
+    pen: Pen,
+    animals_in_pen: dict[int, Animal],
+    method: str,
+    manual: bool,
+) -> None:
+    from RUFAS.biophysical.animal.ration.nutrition_aggregation import NutritionAggregation
+
+    mocker.patch.object(RationManager, "nutrition_aggregation", NutritionAggregation(method))
+    pen.animal_combination = AnimalCombination.GROWING
+    pen.animals_in_pen = animals_in_pen
+    for animal in animals_in_pen.values():
+        animal.nutrient_standard = NutrientStandard.NRC
+    pen.ration = {1: 2.0}
+    mocker.patch.object(pen, "set_animal_nutritional_requirements")
+    failed = OptimizeResult(success=False)
+    mocker.patch.object(pen.ration_optimizer, "attempt_optimization", return_value=(failed, Mock(spec=RationConfig)))
+    mocker.patch.object(pen.ration_optimizer, "handle_failed_constraints", return_value=["calcium_constraint"])
+    mocker.patch.object(RationManager, "user_defined_rations", {AnimalCombination.GROWING: {1: 1.0}}, create=True)
+    mocker.patch.object(RationManager, "tolerance", 0.1, create=True)
+    manual_fallback = mocker.patch.object(pen, "_apply_user_defined_ration")
+    mocker.patch.object(RationManager, "resolve_target_dmi", return_value=9.0)
+    pen.formulate_optimized_ration(manual, _mock_feeds(), 25, {}, MagicMock(), 12)
+    if manual:
+        manual_fallback.assert_called_once()
+    else:
+        manual_fallback.assert_not_called()
+        assert pen.ration == {1: 2.0}

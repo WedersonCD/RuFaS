@@ -906,6 +906,22 @@
         "minimum": 0,
         "default": 75
       },
+      "nutrition_aggregation": {
+        "type": "object",
+        "description": "Experimental pen requirement aggregation; not a validated adequacy rule.",
+        "method": {
+          "type": "string",
+          "pattern": "^(MEAN|MEDIAN|AUTO_MEDIAN|AUTO_P75)$",
+          "default": "MEAN",
+          "description": "Aggregation strategy for eligible nutritional requirements."
+        },
+        "relative_difference_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.10,
+          "description": "Strict threshold for absolute mean-median difference divided by absolute mean."
+        }
+      },
       "maximum_ration_reformulation_attempts": {
         "description": "The maximum number of attempts the ration formulation logic will make before stopping. Meant only to catch edge cases that could cause infinite loops. In normal operation, this value should never be reached.",
         "type": "number",

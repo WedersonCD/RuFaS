@@ -31,6 +31,7 @@ from RUFAS.data_structures.feed_storage_to_animal_connection import RUFAS_ID, Fe
 from RUFAS.biophysical.animal.data_types.animal_combination import AnimalCombination
 from RUFAS.general_constants import GeneralConstants
 from RUFAS.input_manager import InputManager
+from RUFAS.units import MeasurementUnits
 
 from RUFAS.biophysical.animal.ration.ration_optimizer import RationOptimizer, RationConfig
 from RUFAS.output_manager import OutputManager
@@ -166,6 +167,9 @@ class Pen:
         self.allocated_feeds: set[Any] = set()
         self.ration_optimizer = RationOptimizer()
         self.om = OutputManager()
+        self._formulation_event_id = 0
+        self._formulation_attempt = 0
+        self._formulation_simulation_day = -1
 
     @property
     def current_stocking_density(self) -> float:
@@ -1070,7 +1074,7 @@ class Pen:
             self.reset_milk_production_reduction()
 
         self.set_animal_nutritional_requirements(temperature=temperature, available_feeds=pen_available_feeds)
-        initial_requirements = self.average_nutrition_requirements
+        initial_requirements, _ = self._aggregate_formulation_requirements()
 
         solution = self._run_formulation_attempts(
             is_ration_defined_by_user=is_ration_defined_by_user,
@@ -1096,10 +1100,13 @@ class Pen:
         info_map: dict[str, str],
     ) -> OptimizeResult:
         """Runs formulation attempts until success or an exit condition is met."""
+        self._formulation_event_id += 1
+        self._formulation_simulation_day = simulation_day
         current_dmi_requirement = original_dmi_requirement
         num_attempts = 0
         while True:
             num_attempts += 1
+            self._formulation_attempt = num_attempts
             solution, ration_config = self._attempt_formulation(
                 is_ration_defined_by_user,
                 pen_available_feeds,
@@ -1118,7 +1125,7 @@ class Pen:
                 animal_combination=self.animal_combination,
                 pen_id=self.id,
                 pen_available_feeds=pen_available_feeds,
-                average_nutrient_requirements=self.average_nutrition_requirements,
+                average_nutrient_requirements=self._aggregate_formulation_requirements()[0],
                 initial_dry_matter_requirement=current_dmi_requirement,
                 initial_protein_requirement=initial_protein_requirement,
                 sim_day=simulation_day,
@@ -1248,12 +1255,15 @@ class Pen:
             self._calculate_pen_nasem_averages() if nutrient_standard is NutrientStandard.NASEM else (None, None)
         )
 
+        requirements, diagnostics = self._aggregate_formulation_requirements()
+        self._report_nutrition_aggregation(diagnostics)
+
         return self.ration_optimizer.attempt_optimization(
             nutrient_standard=nutrient_standard,
             pen_average_body_weight=self.average_body_weight,
             pen_average_enteric_methane=pen_average_enteric_methane,
             pen_average_urine_nitrogen=pen_average_urine_nitrogen,
-            requirements=self.average_nutrition_requirements,
+            requirements=requirements,
             initial_dry_matter_requirement=initial_dry_matter_requirement,
             initial_protein_requirement=initial_protein_requirement,
             pen_available_feeds=pen_feeds,
@@ -1262,6 +1272,55 @@ class Pen:
             user_defined_ration_dictionary=user_defined_ration_dictionary,
             user_defined_ration_tolerance=tolerance,
         )
+
+    def _aggregate_formulation_requirements(self) -> tuple[NutritionRequirements, dict[str, dict[str, Any]]]:
+        """Aggregate only the requirements passed to formulation, leaving evaluation unchanged."""
+        requirements, diagnostics = RationManager.nutrition_aggregation.aggregate(
+            [animal.nutrition_requirements for animal in self.animals_in_pen.values()]
+        )
+        if RationManager.nutrition_aggregation.method == "MEAN":
+            requirements = self.average_nutrition_requirements
+        return requirements, diagnostics
+
+    def _report_nutrition_aggregation(self, diagnostics: dict[str, dict[str, Any]]) -> None:
+        """Record one flat dictionary per nutrient and attempt for OutputManager CSV export."""
+        for nutrient, record in diagnostics.items():
+            value = {
+                "simulation_day": self._formulation_simulation_day,
+                "pen_id": self.id,
+                "formulation_event_id": self._formulation_event_id,
+                "attempt": self._formulation_attempt,
+                "nutrient": nutrient,
+                "animal_count": len(self.animals_in_pen),
+                "configured_method": RationManager.nutrition_aggregation.method,
+                **record,
+            }
+            nutrient_unit = (
+                MeasurementUnits.MEGACALORIES
+                if "energy" in nutrient
+                else (
+                    MeasurementUnits.KILOGRAMS
+                    if nutrient == "dry_matter"
+                    else (
+                        MeasurementUnits.GRAMS_PER_DAY
+                        if nutrient.startswith("essential_amino_acids.")
+                        else MeasurementUnits.GRAMS
+                    )
+                )
+            )
+            units = {key: MeasurementUnits.UNITLESS for key in value}
+            units.update({key: nutrient_unit for key in ("mean", "median", "p75", "selected_value")})
+            units.update(simulation_day=MeasurementUnits.DAYS, animal_count=MeasurementUnits.ANIMALS)
+            self.om.add_variable(
+                f"nutrition_aggregation_pen_{self.id}_{nutrient}",
+                value,
+                {
+                    "class": "Pen",
+                    "function": "_report_nutrition_aggregation",
+                    "units": units,
+                    "simulation_day": self._formulation_simulation_day,
+                },
+            )
 
     def _calculate_pen_nasem_averages(self) -> tuple[float, float]:
         """
